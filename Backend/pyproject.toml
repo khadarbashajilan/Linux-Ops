@@ -1,0 +1,27 @@
+[project]
+name = "linuxops-backend"
+version = "0.1.0"
+description = "LinuxOps — AI-powered Linux system assistant (FastAPI backend + agent core)"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "pydantic>=2.10",
+    "pydantic-settings>=2.7",
+    "groq>=1.0",
+    "httpx>=0.28",
+    "google-genai>=1.50",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.9",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "D"]
+ignore = ["D203", "D213", "D401", "D415"]

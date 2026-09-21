@@ -1,0 +1,52 @@
+# Docs / Obsidian vault (local only — not versioned)
+docs/
+
+# Secrets & env
+.env
+.env.*
+!.env.example
+.venv/
+venv/
+venv.bak/
+flask/env/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+.turbo/
+.vercel/
+*.tsbuildinfo
+
+# DB / runtime
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+*.log
+.linuxops/
+
+# opencode (local project config — agents, commands, skills)
+.opencode/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
