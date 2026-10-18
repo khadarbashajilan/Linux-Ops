@@ -1,76 +1,62 @@
-"""3-tier failover router.
+"""LLM provider entrypoint.
 
-Tries providers in order (Groq -> OpenRouter -> Gemini) on ``ProviderError``.
-Tiers whose API key is unset are skipped so a missing key doesn't burn a
-request.
+Single Ollama provider — calls the local Ollama instance.
+Assumes Docker (or bare-metal Ollama) is already running with the configured model.
 """
 
 import logging
 
-from app.core.config import Settings, get_settings
+from app.core.config import get_settings
 from app.llm.base import (
     ChatMessage,
-    LLMProvider,
     LLMResponse,
-    ProviderError,
     ToolSchema,
 )
-from app.llm.gemini_provider import GeminiProvider
-from app.llm.groq_provider import GroqProvider
-from app.llm.openrouter_provider import OpenRouterProvider
+from app.llm.ollama_provider import OllamaProvider
 
 logger = logging.getLogger(__name__)
 
 
 class LLMRouter:
-    """Failover chain over the configured providers."""
+    """Thin wrapper — single Ollama provider, no failover."""
 
-    def __init__(self, settings: Settings | None = None) -> None:
-        """Build the tier list, skipping providers without a key."""
-        self._settings = settings or get_settings()
-        self._tiers: list[LLMProvider] = []
-        if self._settings.groq_api_key.get_secret_value():
-            self._tiers.append(GroqProvider(self._settings))
-        if self._settings.openrouter_api_key.get_secret_value():
-            self._tiers.append(OpenRouterProvider(self._settings))
-        if self._settings.gemini_api_key.get_secret_value():
-            self._tiers.append(GeminiProvider(self._settings))
+    def __init__(self) -> None:
+        """Initialise the Ollama provider."""
+        self._provider = OllamaProvider(get_settings())
 
     @property
     def active_tiers(self) -> list[str]:
-        """Return the names of providers currently enabled."""
-        return [type(p).__name__ for p in self._tiers]
+        """Return the active provider name."""
+        return ["OllamaProvider"]
 
     async def chat(self, messages: list[ChatMessage], tools: list[ToolSchema]) -> LLMResponse:
-        """Run a chat completion, failing over across enabled tiers.
+        """Run a chat completion against the Ollama provider.
 
         Args:
             messages: OpenAI-style conversation history.
             tools: JSON tool schemas for tool calling.
 
         Returns:
-            The first successful provider response.
+            The model response.
 
         Raises:
-            ProviderError: if every enabled tier fails.
+            OllamaConnectionError: when Ollama is unreachable.
+            OllamaResponseError: when Ollama returns a non-200 or unexpected format.
+            ProviderError: on unexpected internal errors.
 
         """
-        if not self._tiers:
-            raise ProviderError(
-                "no LLM providers configured — set at least one API key",
-                retryable=False,
-            )
-        errors: list[str] = []
-        for provider in self._tiers:
-            try:
-                response = await provider.chat(messages, tools)
-                logger.info("LLM response from %s", type(provider).__name__)
-                return response
-            except ProviderError as exc:
-                errors.append(str(exc))
-                logger.warning(
-                    "tier %s failed, failing over: %s",
-                    type(provider).__name__,
-                    exc,
-                )
-        raise ProviderError(f"all LLM tiers failed: {' | '.join(errors)}")
+        response = await self._provider.chat(messages, tools)
+        logger.info("LLM response from Ollama (%s)", self._provider._model)
+        return response
+
+    async def health_check(self) -> tuple[bool, float]:
+        """Check if Ollama is reachable and responsive.
+
+        Returns:
+            A tuple of (is_healthy, latency_ms).
+
+        Raises:
+            OllamaConnectionError: when Ollama cannot be reached.
+
+        """
+        return await self._provider.health_check()

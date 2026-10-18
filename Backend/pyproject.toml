@@ -8,9 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.34",
     "pydantic>=2.10",
     "pydantic-settings>=2.7",
-    "groq>=1.0",
     "httpx>=0.28",
-    "google-genai>=1.50",
+    "tenacity>=9",
 ]
 
 [dependency-groups]

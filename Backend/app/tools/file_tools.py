@@ -1,51 +1,96 @@
-"""File tools: list_dir and read_file.
+"""File tools: list_dir, read_file, write_file.
 
-Both tools are scoped to an allowlist (~ and /tmp). Paths are resolved and
-must stay inside an allowed base, blocking traversal like ``../etc/passwd``.
+All file tools share a three-layer scope check, in order:
+
+1. **Hard deny** — ``Settings.denied_bases`` is seeded with ``~/.ssh``,
+   ``~/.aws``, ``~/.gnupg``, ``~/.config/gh``, ``/etc``, ``/boot``, ``/sys``,
+   ``/proc``. Any path resolving under one of these is rejected with
+   ``PermissionError``, regardless of ``LINUXOPS_ALLOWED_PATHS``. The user
+   cannot widen past these via env vars.
+
+2. **Capability allowlist** — read tools check against ``allowed_bases``
+   (home + cwd + extras); write tools check against ``write_allowed_bases``
+   (cwd + /tmp + extras). The home directory is **not** auto-included for
+   writes.
+
+3. **Realpath eval** — symlinks are resolved before either check, so a
+   symlink inside an allowed base that points at ``~/.ssh`` is still denied.
+
+This is the cheap, in-the-meantime safety floor. Phase 02 will layer the
+risk classifier + audit log on top.
 """
 
 import asyncio
-import os
+import re
 from pathlib import Path
 
 from pydantic import BaseModel, Field
 
+from app.core.config import get_settings
 from app.tools.registry import registry
 
-ALLOWED_BASES: tuple[Path, ...] = (Path.home(), Path("/tmp"))
+_HIDDEN_FILE_RE = re.compile(r"^\.env($|\.)")
 
 
-def _resolve_within_allowlist(raw_path: str) -> Path:
-    """Resolve a path and assert it lives inside the allowlist.
+def _is_hidden_secret_file(path: Path) -> bool:
+    """True if the filename looks like a secret env file (``.env``, ``.env.*``)."""
+    return bool(_HIDDEN_FILE_RE.match(path.name))
+
+
+def _check_scope(raw: Path, allowed: tuple[Path, ...]) -> Path:
+    """Resolve + apply deny-then-allow scope check against an allow tuple.
 
     Args:
-        raw_path: user/model-supplied path (absolute or ~-relative).
+        raw: the user/model-supplied path.
+        allowed: the capability-specific allow tuple.
 
     Returns:
-        The resolved, allowlisted path.
+        The resolved, in-scope absolute path.
 
     Raises:
-        PermissionError: if the resolved path escapes the allowlist.
+        PermissionError: if the path is denied, outside the allowlist, or is
+            a hidden secret file.
 
     """
-    candidate = Path(raw_path).expanduser().resolve()
-    if not any(candidate == base or base in candidate.parents for base in ALLOWED_BASES):
-        allowed = ", ".join(str(b) for b in ALLOWED_BASES)
-        raise PermissionError(f"path outside allowlist ({allowed}): {candidate}")
+    settings = get_settings()
+    candidate = raw.expanduser().resolve()
+
+    # Layer 1 — hard deny (always wins).
+    for base in settings.denied_bases:
+        if candidate == base or base in candidate.parents:
+            raise PermissionError(f"path denied by hard policy: {candidate}")
+
+    # Layer 1b — hidden secret files (defense in depth against name-based bypass).
+    if _is_hidden_secret_file(candidate):
+        raise PermissionError(f"path denied by hard policy (.env*): {candidate}")
+
+    # Layer 2 — capability allowlist.
+    if not any(candidate == base or base in candidate.parents for base in allowed):
+        listed = ", ".join(str(b) for b in allowed) or "<empty>"
+        raise PermissionError(f"path outside allowlist ({listed}): {candidate}")
+
     return candidate
 
 
 class ListDirArgs(BaseModel):
     """Arguments for list_dir."""
 
-    path: str = Field(..., description="Directory path to list (~ or /tmp scoped)")
+    path: str = Field(..., description="Directory path to list (inside an allowlisted base)")
 
 
 class ReadFileArgs(BaseModel):
     """Arguments for read_file."""
 
-    path: str = Field(..., description="File path to read (~ or /tmp scoped)")
+    path: str = Field(..., description="File path to read (must be inside an allowlisted base)")
     max_bytes: int = Field(default=65536, ge=1, le=1_048_576)
+
+
+class WriteFileArgs(BaseModel):
+    """Arguments for write_file."""
+
+    path: str = Field(..., description="File path to write (write-scoped base; not ~)")
+    content: str = Field(..., description="Exact file content to write (overwrites)")
+    create_parents: bool = Field(default=False, description="If true, mkdir -p the parent")
 
 
 @registry.tool(
@@ -62,11 +107,11 @@ async def list_dir(args: ListDirArgs) -> dict:
         A dict with the path and a list of entry descriptors.
 
     """
-    target = _resolve_within_allowlist(args.path)
+    target = _check_scope(Path(args.path), get_settings().allowed_bases)
 
     def _scan() -> list[dict]:
-        entries = []
-        with os.scandir(target) as it:
+        entries: list[dict] = []
+        with __import__("os").scandir(target) as it:
             for entry in it:
                 try:
                     stat = entry.stat(follow_symlinks=False)
@@ -100,7 +145,7 @@ async def read_file(args: ReadFileArgs) -> dict:
         A dict with content, byte length, and a truncated flag.
 
     """
-    target = _resolve_within_allowlist(args.path)
+    target = _check_scope(Path(args.path), get_settings().allowed_bases)
     if not target.is_file():
         raise FileNotFoundError(f"not a file: {target}")
 
@@ -116,3 +161,31 @@ async def read_file(args: ReadFileArgs) -> dict:
         "size": size,
         "truncated": truncated,
     }
+
+
+@registry.tool(
+    risk="confirm",
+    description=(
+        "Write text content to a file. Overwrites existing files. "
+        "Scope: cwd + /tmp only (NOT the home directory)."
+    ),
+)
+async def write_file(args: WriteFileArgs) -> dict:
+    """Write content to a file inside the write-scoped allowlist.
+
+    Args:
+        args: the validated tool arguments.
+
+    Returns:
+        A dict with the resolved path and bytes written.
+
+    """
+    target = _check_scope(Path(args.path), get_settings().write_allowed_bases)
+
+    def _write() -> int:
+        if args.create_parents:
+            target.parent.mkdir(parents=True, exist_ok=True)
+        return target.write_text(args.content, encoding="utf-8")
+
+    written = await asyncio.to_thread(_write)
+    return {"path": str(target), "bytes_written": written}

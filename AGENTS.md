@@ -18,7 +18,7 @@
 1. **Agentic tool-use** — LLM *decides* which typed tool to call with what args; not a chatbot wrapper.
 2. **Safety / guardrails engineering** — 3-tier risk classifier + human-in-the-loop confirmation + full audit log. The differentiator.
 3. **Full-stack ownership** — CLI + FastAPI + Next.js, one shared backend ("same brain, two interfaces").
-4. **Local-first, provider-agnostic LLM layer** — Groq primary, Gemini/OpenRouter/Ollama swappable behind one interface.
+4. **Local-first LLM via Ollama** — `qwen3:4b` running locally in Docker, no external API keys, no rate limits.
 5. **Observability** — audit trail of every agent action, replayable.
 
 ## Stack
@@ -29,7 +29,7 @@
 | Agent loop | Plain Python, hand-rolled ReAct | NO LangChain/LangGraph in v1 — build the loop yourself, from scratch |
 | CLI | Typer + `rich` | thin client, same HTTP/WS backend as web |
 | Frontend | Next.js (App Router) + React + Tailwind | mostly `"use client"` components |
-| LLM | 3-tier fallback: Groq `openai/gpt-oss-20b` → OpenRouter `openrouter/free` → Gemini `gemini-3.5-flash` | one `LLMProvider` Protocol + `router.py` failover |
+| LLM | Ollama `qwen3:4b` (local via Docker) | single `OllamaProvider`, no failover |
 | DB | SQLite + SQLModel/SQLAlchemy + WAL | conversations, messages, tool_calls, audit_log |
 | Memory (stretch) | ChromaDB (local, embedded) | do NOT build pre-MVP |
 | System tools | psutil, subprocess (NO `shell=True` for LLM strings), shutil, pathlib | typed, validated tools only |
@@ -41,7 +41,7 @@ CLI ──┐                         ┌─── Filesystem
 Web ──┼── HTTP/WS ── FastAPI ── Agent Core ── Safety Middleware ── Tool Registry ──┼── Processes
       │               REST/WS      │     │        3-tier          (@tool + Pydantic)┼── System stats
       │                            │     └─ decide risk           ──────────────────┼── Apps (xdg-open)
-      │                            └── LLM Provider Layer (Groq gpt-oss-20b → OpenRouter free → Gemini 3.5-flash)
+      │                            └── LLM Provider Layer (Ollama qwen3:4b via Docker)
       │
       └── SQLite (conversations / audit)  ·  ChromaDB (stretch memory)
 ```
@@ -91,7 +91,7 @@ Rule: **finish a phase's milestone before starting the next one.** Do not touch 
 
 1. CLI is a **thin client** — calls the FastAPI backend over HTTP/WS exactly like the web UI. No agent logic in the CLI. One source of truth.
 2. Tool definitions via `@tool` decorator + Pydantic models; JSON schemas auto-generated from the models (DRY).
-3. LLM providers behind a `typing.Protocol` interface — built as a **3-tier failover router from day one** (Groq → OpenRouter → Gemini) because free tiers rate-limit. This overrides the blueprint's original "one provider first" advice (decision 2026-09-21). All providers share the same `chat(messages, tools)` contract; swapping is one line.
+3. LLM via **Ollama** (local, `qwen3:4b`) — no external API keys, no rate limits, no cost. `LLMProvider` Protocol kept for clean abstraction; swapping models is a one-line env var change.
 4. Safety in 3 tiers: 🟢 auto / 🟡 confirm (user y/n or modal) / 🔴 block (typed confirm or hard deny). Denials get logged too.
 5. MVP hard-lock — file ops, process mgmt, system stats, app launch, guarded shell. Stretch (memory/voice/multi-LLM/planning/scheduling/docker) only after MVP demo is solid.
 6. Design the safety layer as a distinct module, not an afterthought.
@@ -112,12 +112,22 @@ Rule: **finish a phase's milestone before starting the next one.** Do not touch 
 ## Environment variables
 
 > Set in `Backend/.env` (git-ignored; template in `Backend/.env.example`):
-> - `GROQ_API_KEY` (tier 1)
-> - `OPENROUTER_API_KEY` (tier 2)
-> - `GEMINI_API_KEY` (tier 3 — use an AI-Studio-restricted key)
-> - `GROQ_MODEL=openai/gpt-oss-20b` · `OPENROUTER_MODEL=openrouter/free` · `GEMINI_MODEL=gemini-3.5-flash`
+> - `OLLAMA_BASE_URL` (default `http://localhost:11434`)
+> - `OLLAMA_MODEL=qwen3:4b`
+> - `LINUXOPS_ALLOWED_PATHS` (extra read/write/exec scope on top of implicit defaults; `:`/`,`-separated; `~`-expanded)
+> - `LINUXOPS_DENIED_PATHS` (extra hard-deny on top of seeded list)
 > - `LINUXOPS_API_TOKEN` (local auth, single-user — Phase 03)
 > - `LINUXOPS_DB_PATH` (SQLite location, default local — Phase 04)
+
+### Filesystem scope model (3 layers, deny wins)
+
+| Capability | Implicit scope | Hard deny (always on) | Env can override? |
+|---|---|---|---|
+| read (`list_dir`, `read_file`) | `~` + cwd + `LINUXOPS_ALLOWED_PATHS` | `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `/etc`, `/boot`, `/sys`, `/proc`, `.env*`, + `LINUXOPS_DENIED_PATHS` | deny: no — allow: yes |
+| write (`write_file`) | cwd + `/tmp` + `LINUXOPS_ALLOWED_PATHS` | same | deny: no — allow: yes |
+| exec (Phase 02 `run_shell`) | cwd + `LINUXOPS_ALLOWED_PATHS` | same | deny: no — allow: yes |
+
+Realpath resolved before each check (symlinks cannot bypass). `.env*` filenames blocked at any depth. Defense in depth — Phase 02 risk classifier + audit log layers on top.
 
 ## Conventions & rules for agents
 
@@ -149,7 +159,7 @@ Rule: **finish a phase's milestone before starting the next one.** Do not touch 
 - `AGENTS.md` — this file, untracked.
 - `.opencode/` — project opencode config (local): `opencode.json`, `safety-reviewer` agent, `progress`/`phase` commands. Git-ignored.
 - Vault fully authored (index + blueprint + learning topics + 4 phases) but **not** git-tracked by decision.
-- `Backend/` — Phase 01 **DONE**. FastAPI app + `LLMProvider` Protocol + 3 providers + failover router + `@tool` registry + `list_dir`/`read_file` (allowlist `~`+`/tmp`). Milestone verified live via OpenRouter tier. `.env` has placeholders; `OPENROUTER_API_KEY` set in shell env.
+- `Backend/` — Phase 01 **DONE**. FastAPI app + `LLMProvider` Protocol + single `OllamaProvider` + `@tool` registry + `list_dir`/`read_file` (allowlist config-driven: `LINUXOPS_ALLOWED_PATHS`, default `~:/tmp` + server cwd). External providers (Groq/OpenRouter/Gemini) removed 2026-10-01. `.env` has Ollama config (git-ignored).
 
 ---
 
@@ -161,3 +171,22 @@ Rule: **finish a phase's milestone before starting the next one.** Do not touch 
 - Code standards enforced: Google docstrings everywhere, type hints, ruff clean (`check` + `format`).
 - **Milestone passed:** `curl POST /chat "what's in my home folder?"` → real `list_dir` result (58 entries), tool loop logged; `/health` 200. Ran via OpenRouter tier (only key present).
 - **Next:** Phase 02 — Safety: ReAct loop hardening, 3-tier risk classifier, confirm gate, audit log, remaining tools (proc/system/app/guarded shell).
+
+### 2026-09-21 — Session 4: config-driven allowlist + auto-cwd
+- Symptom: WSL user asked "list current files" → `list_dir` denied; cwd on `/mnt/f` (Windows mount) was outside the hardcoded `(Path.home(), Path("/tmp"))` allowlist.
+- Fix: added `LINUXOPS_ALLOWED_PATHS` setting in `core/config.py` (parsed `:`/`,`-separated, `~`-expanded via `Settings.allowed_bases`); `file_tools._allowed_bases()` now returns config bases + `Path.cwd()`, so relative paths (`.`, `./x`) resolve against server cwd and are auto-allowed.
+- `.env` set to `~:/tmp:/mnt/f`; `.env.example` documents `~:/tmp`.
+- Verified: `/mnt/f` + cwd allowed, `/etc/passwd` still denied, `~/x` OK. `ruff check` + `ruff format` clean.
+
+### 2026-10-16 — Session 5: filesystem scope model (3-layer, deny wins) + `write_file`
+- Symptom: `LINUXOPS_ALLOWED_PATHS` was a single env-driven allowlist, no deny layer, no per-capability split. `~` was auto-included for writes — agent could `write_file ~/.ssh/...` if path resolved cleanly; `.env*` filenames were unprotected; user mistake in `.env` could expose `/etc` or `~/.ssh`.
+- Fix: 3-layer scope model in `core/config.py` + `tools/file_tools.py`:
+  - **Hard deny** (`Settings.denied_bases`) — seeded: `~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.config/gh`, `~/.config/git-credential-manager`, `/etc`, `/boot`, `/sys`, `/proc`. Env-additive only (`LINUXOPS_DENIED_PATHS`), cannot be removed.
+  - **Capability allowlist** — `allowed_bases` (read: `~` + cwd + extras), `write_allowed_bases` (write: cwd + `/tmp` + extras, `~` NOT auto-included), `exec_allowed_bases` (exec: cwd only).
+  - **Realpath + filename check** — symlinks resolved before either check; `.env*` blocked at any depth.
+  - `_check_scope(raw, allowed_tuple)` is the single chokepoint; `_resolve_within_allowlist` deleted.
+- Added `write_file` tool (`risk="confirm"`) — write-scoped, will be gated by Phase 02 confirm middleware.
+- `.env` + `.env.example` updated; both now document the deny-wins/3-layer model.
+- Verified: all 11 hard-deny cases blocked (incl. `~/.ssh`, `~/.aws`, `~/.gnupg`, `/etc`, `/proc`, `/boot`, `/sys`, `.env`, `.env.local`, `./.env`); home + cwd still readable; writes scoped to cwd + `/tmp`; exec scoped to cwd only. `ruff check` + `ruff format` clean.
+- AGENTS.md env-vars section updated with scope table.
+- **Next:** Phase 02 — risk classifier, confirm gate, audit log, remaining tools (`proc`, `system`, `app`, `run_shell`).
