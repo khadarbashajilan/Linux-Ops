@@ -1,12 +1,20 @@
 """Shared pytest fixtures: async backend, isolated settings, fake LLM provider."""
 
-from collections.abc import Iterator
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from app.core.config import Settings
 from app.llm.base import ChatMessage, LLMResponse, ToolSchema
+
+UseHome = Callable[..., Settings]
+
+
+def isolated_settings(**overrides: Any) -> Settings:
+    """Build settings that ignore ``Backend/.env``."""
+    return Settings(_env_file=None, **overrides)
 
 
 @pytest.fixture
@@ -16,10 +24,27 @@ def anyio_backend() -> str:
 
 
 @pytest.fixture
-def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Point HOME and cwd at temp dirs and use settings that ignore ``.env``.
+def use_home(monkeypatch: pytest.MonkeyPatch) -> UseHome:
+    """Return ``apply(home, **overrides)``: set HOME and install matching settings.
 
-    Yields:
+    The settings are built after HOME changes, so ``~``-based scope rules point
+    at the fake home, and file tools are patched to use them.
+    """
+
+    def apply(home: Path, **overrides: Any) -> Settings:
+        monkeypatch.setenv("HOME", str(home))
+        settings = isolated_settings(**overrides)
+        monkeypatch.setattr("app.tools.file_tools.get_settings", lambda: settings)
+        return settings
+
+    return apply
+
+
+@pytest.fixture
+def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, use_home: UseHome) -> Path:
+    """Use a fake home and a separate fake cwd, both under ``tmp_path``.
+
+    Returns:
         The fake home directory.
 
     """
@@ -27,11 +52,9 @@ def sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     work = tmp_path / "work"
     home.mkdir()
     work.mkdir()
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.chdir(work)
-    settings = Settings(_env_file=None)
-    monkeypatch.setattr("app.tools.file_tools.get_settings", lambda: settings)
-    yield home
+    use_home(home)
+    return home
 
 
 class FakeProvider:

@@ -1,6 +1,6 @@
 """HTTP layer tests with the agent dependency overridden (no Ollama needed)."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 import pytest
 from fastapi.testclient import TestClient
@@ -23,12 +23,22 @@ class DownProvider(FakeProvider):
 
 
 @pytest.fixture
-def client() -> Iterator[TestClient]:
-    """Test client whose agent answers 'pong' without any tools."""
-    agent = Agent(FakeProvider([LLMResponse(content="pong")]))
-    app.dependency_overrides[get_agent] = lambda: agent
-    yield TestClient(app)
+def client_for() -> Iterator[Callable[[FakeProvider], TestClient]]:
+    """Return a factory for test clients whose agent uses the given provider."""
+
+    def make(provider: FakeProvider) -> TestClient:
+        agent = Agent(provider)
+        app.dependency_overrides[get_agent] = lambda: agent
+        return TestClient(app)
+
+    yield make
     app.dependency_overrides.clear()
+
+
+@pytest.fixture
+def client(client_for: Callable[[FakeProvider], TestClient]) -> TestClient:
+    """Test client whose agent answers 'pong' without any tools."""
+    return client_for(FakeProvider([LLMResponse(content="pong")]))
 
 
 def test_chat(client: TestClient) -> None:
@@ -56,11 +66,7 @@ def test_health_ok(client: TestClient) -> None:
     assert body["model"] == "fake"
 
 
-def test_health_degraded() -> None:
-    app.dependency_overrides[get_agent] = lambda: Agent(DownProvider([]))
-    try:
-        body = TestClient(app).get("/health").json()
-    finally:
-        app.dependency_overrides.clear()
+def test_health_degraded(client_for: Callable[[FakeProvider], TestClient]) -> None:
+    body = client_for(DownProvider([])).get("/health").json()
     assert body["status"] == "degraded"
     assert body["ollama"] == "unreachable"

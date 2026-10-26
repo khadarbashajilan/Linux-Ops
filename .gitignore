@@ -50,3 +50,5 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+# Local agent notes (not versioned)
+AGENTS.md

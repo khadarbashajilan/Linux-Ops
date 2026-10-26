@@ -78,6 +78,12 @@ class _OllamaResponse(BaseModel):
     message: _OllamaMessage | None = None
 
 
+def _raise_for_status(resp: httpx.Response) -> None:
+    """Raise ``OllamaResponseError`` for any 4xx/5xx response."""
+    if resp.is_error:
+        raise OllamaResponseError(resp.status_code, resp.text[:200])
+
+
 def _parse_arguments(raw: dict[str, Any] | str) -> dict[str, Any]:
     """Normalise tool arguments that may arrive as a dict or a JSON string."""
     if isinstance(raw, dict):
@@ -165,8 +171,7 @@ class OllamaProvider:
         resp = await self._request("POST", "/api/chat", json=payload)
         if resp.status_code == 404:
             raise OllamaResponseError(404, f"model {self._model!r} not found — pull it first")
-        if resp.status_code >= 400:
-            raise OllamaResponseError(resp.status_code, resp.text[:200])
+        _raise_for_status(resp)
         try:
             return _OllamaResponse.model_validate(resp.json())
         except (json.JSONDecodeError, ValidationError) as exc:
@@ -224,6 +229,5 @@ class OllamaProvider:
         """
         start = time.perf_counter()
         resp = await self._request("GET", "/api/version")
-        if resp.status_code != 200:
-            raise OllamaResponseError(resp.status_code, resp.text[:200])
+        _raise_for_status(resp)
         return (time.perf_counter() - start) * 1000

@@ -3,9 +3,13 @@
 import pytest
 from pydantic import BaseModel, ValidationError
 
-from app.tools.registry import ToolRegistry
+from app.tools.registry import ToolRegistry, registry
 
 pytestmark = pytest.mark.anyio
+
+
+def test_package_import_registers_file_tools() -> None:
+    assert {"list_dir", "read_file"} <= set(registry.names())
 
 
 class EchoArgs(BaseModel):

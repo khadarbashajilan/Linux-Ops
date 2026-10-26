@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app.core.config import Settings
 from app.tools.file_tools import ListDirArgs, ReadFileArgs, list_dir, read_file
+from tests.conftest import UseHome, isolated_settings
 
 pytestmark = pytest.mark.anyio
 
@@ -57,17 +57,13 @@ async def test_traversal_resolved(sandbox: Path) -> None:
         await read_file(ReadFileArgs(path="~/../../../../etc/passwd"))
 
 
-async def test_symlinked_home_cannot_bypass_deny(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_symlinked_home_cannot_bypass_deny(tmp_path: Path, use_home: UseHome) -> None:
     real_home = tmp_path / "real_home"
     (real_home / ".ssh").mkdir(parents=True)
     (real_home / ".ssh" / "id_rsa").write_text("secret")
     link_home = tmp_path / "link_home"
     link_home.symlink_to(real_home)
-    monkeypatch.setenv("HOME", str(link_home))
-    settings = Settings(_env_file=None)
-    monkeypatch.setattr("app.tools.file_tools.get_settings", lambda: settings)
+    use_home(link_home)
     with pytest.raises(PermissionError, match="hard policy"):
         await read_file(ReadFileArgs(path="~/.ssh/id_rsa"))
 
@@ -91,15 +87,12 @@ async def test_directory_is_not_a_file(sandbox: Path) -> None:
         await read_file(ReadFileArgs(path="~"))
 
 
-def test_denied_paths_are_additive(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    settings = Settings(_env_file=None, linuxops_denied_paths=str(tmp_path / "private"))
+def test_denied_paths_are_additive(tmp_path: Path, use_home: UseHome) -> None:
+    settings = use_home(tmp_path, linuxops_denied_paths=str(tmp_path / "private"))
     assert (tmp_path / "private").resolve() in settings.denied_bases
     assert Path("/etc").resolve() in settings.denied_bases
 
 
-def test_home_not_in_write_scope(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path / "h"))
-    monkeypatch.chdir(tmp_path)
-    settings = Settings(_env_file=None)
-    assert (tmp_path / "h").resolve() not in settings.write_allowed_bases
+def test_home_not_in_write_scope(sandbox: Path) -> None:
+    settings = isolated_settings()
+    assert sandbox.resolve() not in settings.write_allowed_bases

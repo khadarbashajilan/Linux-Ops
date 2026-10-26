@@ -10,7 +10,6 @@ import logging
 from dataclasses import dataclass, field
 
 from app.llm.base import ChatMessage, LLMProvider, ToolCall
-from app.tools import file_tools  # noqa: F401 — registers tools on import
 from app.tools.registry import ToolRegistry, registry
 
 logger = logging.getLogger(__name__)
