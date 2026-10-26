@@ -1,69 +1,48 @@
-"""Rich UI helpers for CLI output."""
+"""Rich rendering helpers for CLI output."""
+
+from collections.abc import Iterator
+from contextlib import contextmanager
+from typing import Any
 
 from rich.console import Console
-from rich.spinner import Spinner
-from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
-import time
-from contextlib import contextmanager
 
 console = Console()
 
+_HEALTH_STYLE = {"ok": "green", "degraded": "yellow"}
+
 
 @contextmanager
-def spinner_context(message: str):
-    """Context manager for a spinner with a message.
-
-    Args:
-        message: Text to display next to the spinner.
-    """
-    with Live(Spinner("dots", text=message), console=console, transient=True):
+def spinner(message: str) -> Iterator[None]:
+    """Show a transient spinner while the wrapped block runs."""
+    with console.status(message, spinner="dots"):
         yield
 
 
-def print_tool_calls(tool_calls: list[dict]) -> None:
-    """Display tool calls in a formatted table.
+def print_answer(answer: str, tool_calls: list[str]) -> None:
+    """Render the tools the agent used, then its answer."""
+    if tool_calls:
+        console.print(f"[dim]tools used:[/dim] [cyan]{', '.join(tool_calls)}[/cyan]")
+    body = Text(answer) if answer else Text("No response", style="dim")
+    console.print(Panel(body, title="[bold blue]Agent[/bold blue]"))
 
-    Args:
-        tool_calls: List of tool call dicts from the API response.
-    """
-    if not tool_calls:
-        return
 
-    table = Table(title="Tool Calls", show_header=True, header_style="bold magenta")
-    table.add_column("Tool", style="cyan")
-    table.add_column("Arguments", style="dim")
-
-    for call in tool_calls:
-        name = call.get("name", "unknown")
-        args = call.get("arguments", {})
-        args_str = ", ".join(f"{k}={v!r}" for k, v in args.items())[:60]
-        table.add_row(name, args_str)
-
+def print_health(health: dict[str, Any], base_url: str) -> None:
+    """Render the backend health payload as a table."""
+    status = health.get("status", "unknown")
+    table = Table(title="Backend Health", show_header=False)
+    table.add_column("Key", style="cyan")
+    table.add_column("Value")
+    table.add_row("Backend", base_url)
+    table.add_row("Status", f"[{_HEALTH_STYLE.get(status, 'red')}]{status}[/]")
+    table.add_row("Ollama", health.get("ollama", "unknown"))
+    table.add_row("Model", health.get("model", "unknown"))
+    latency = health.get("ollama_latency_ms")
+    if latency is not None:
+        table.add_row("Latency", f"{latency:.1f} ms")
     console.print(table)
-
-
-def print_risk_badge(risk: str) -> str:
-    """Return a colored badge for a risk tier.
-
-    Args:
-        risk: Risk tier string (safe, confirm, block).
-
-    Returns:
-        Rich-formatted string with colored badge.
-    """
-    badges = {
-        "safe": "[bold green]🟢 safe[/bold green]",
-        "confirm": "[bold yellow]🟡 confirm[/bold yellow]",
-        "block": "[bold red]🔴 block[/bold red]",
-    }
-    return badges.get(risk.lower(), f"[dim]{risk}[/dim]")
-
-
-def print_success(message: str) -> None:
-    """Print a success message."""
-    console.print(f"[bold green]✓[/bold green] {message}")
 
 
 def print_error(message: str) -> None:
@@ -71,6 +50,6 @@ def print_error(message: str) -> None:
     console.print(f"[bold red]✗[/bold red] {message}")
 
 
-def print_warning(message: str) -> None:
-    """Print a warning message."""
-    console.print(f"[bold yellow]⚠[/bold yellow] {message}")
+def print_success(message: str) -> None:
+    """Print a success message."""
+    console.print(f"[bold green]✓[/bold green] {message}")

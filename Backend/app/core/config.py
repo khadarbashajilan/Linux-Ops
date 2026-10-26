@@ -1,21 +1,45 @@
 """Application configuration loaded from environment and .env.
 
-Central settings object for LinuxOps backend. Secrets are held as
-pydantic.SecretStr and never logged or echoed in errors.
+Central settings object for the LinuxOps backend, including the filesystem
+scope model: a hard-deny list that always wins, plus per-capability
+allowlists (read, write, exec).
 """
 
 import os
+from collections.abc import Iterable
 from functools import lru_cache
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+_SEEDED_DENY: tuple[str, ...] = (
+    "~/.ssh",
+    "~/.aws",
+    "~/.gnupg",
+    "~/.config/gh",
+    "~/.config/git-credential-manager",
+    "/etc",
+    "/boot",
+    "/sys",
+    "/proc",
+)
+
+
+def _unique(paths: Iterable[Path]) -> tuple[Path, ...]:
+    """Return paths with duplicates removed, preserving first-seen order."""
+    return tuple(dict.fromkeys(paths))
+
+
+def _resolve(raw: str) -> Path:
+    """Expand ``~`` and resolve symlinks so comparisons use real paths."""
+    return Path(raw).expanduser().resolve()
+
 
 class Settings(BaseSettings):
     """Runtime configuration for the backend.
 
-    Reads from environment variables, falling back to the Backend/.env
-    file (git-ignored). Ollama is used as the sole LLM provider.
+    Reads from environment variables, falling back to ``Backend/.env``
+    (git-ignored). Ollama is the sole LLM provider.
     """
 
     model_config = SettingsConfigDict(
@@ -30,94 +54,44 @@ class Settings(BaseSettings):
     ollama_timeout_read: int = 120
     ollama_max_retries: int = 3
 
-    # Filesystem scope — split by capability so write/shell are tighter than read.
-    # `linuxops_allowed_paths` is the **extra** allowlist on top of the implicit
-    # home + cwd scope. `linuxops_denied_paths` is a hard deny that **always**
-    # wins and is itself seeded with critical secret/system paths so a typo
-    # in `.env` can never expose them.
+    # Extra scope on top of the implicit per-capability defaults. The deny list
+    # is additive only, so a typo here can never expose a seeded path.
     linuxops_allowed_paths: str = ""
     linuxops_denied_paths: str = ""
 
     def _parse_paths(self, raw: str) -> tuple[Path, ...]:
-        """Parse a ``:/,/`` separated path list into resolved absolute Paths."""
-        raw = raw.replace(os.pathsep, ",")
-        out: list[Path] = []
-        for entry in raw.split(","):
-            entry = entry.strip()
-            if entry:
-                out.append(Path(entry).expanduser().resolve())
-        return tuple(out)
+        """Parse a ``:`` or ``,`` separated path list into resolved Paths."""
+        entries = raw.replace(os.pathsep, ",").split(",")
+        return tuple(_resolve(e.strip()) for e in entries if e.strip())
+
+    def _with_extras(self, *implicit: Path) -> tuple[Path, ...]:
+        """Combine implicit bases with ``LINUXOPS_ALLOWED_PATHS`` extras."""
+        return _unique((*implicit, *self._parse_paths(self.linuxops_allowed_paths)))
 
     @property
     def allowed_bases(self) -> tuple[Path, ...]:
-        """Default filesystem scope: ``~``, server cwd, plus any user extras.
-
-        Used for **read-only** tools (list_dir, read_file). Write and exec
-        tools have their own tighter scopes.
-        """
-        extras = self._parse_paths(self.linuxops_allowed_paths)
-        implicit = (Path.home(), Path.cwd().resolve())
-        # Preserve uniqueness, implicit first.
-        seen: set[Path] = set()
-        bases: list[Path] = []
-        for b in (*implicit, *extras):
-            if b not in seen:
-                bases.append(b)
-                seen.add(b)
-        return tuple(bases)
-
-    @property
-    def denied_bases(self) -> tuple[Path, ...]:
-        """Hard-deny list — always wins over allowlist, not env-overridable.
-
-        Seeded with secrets + system mounts. Any path under any of these is
-        rejected regardless of ``LINUXOPS_ALLOWED_PATHS``.
-        """
-        seeded: tuple[Path, ...] = (
-            Path.home() / ".ssh",
-            Path.home() / ".aws",
-            Path.home() / ".gnupg",
-            Path.home() / ".config" / "gh",
-            Path.home() / ".config" / "git-credential-manager",
-            Path("/etc"),
-            Path("/boot"),
-            Path("/sys"),
-            Path("/proc"),
-        )
-        user_extra = self._parse_paths(self.linuxops_denied_paths)
-        seen: set[Path] = set()
-        out: list[Path] = []
-        for b in (*seeded, *user_extra):
-            if b not in seen:
-                out.append(b)
-                seen.add(b)
-        return tuple(out)
+        """Read scope: ``~``, server cwd, plus extras."""
+        return self._with_extras(Path.home().resolve(), Path.cwd().resolve())
 
     @property
     def write_allowed_bases(self) -> tuple[Path, ...]:
-        """Write scope: cwd + /tmp only. ``~`` is NOT auto-included."""
-        extras = self._parse_paths(self.linuxops_allowed_paths)
-        implicit = (Path.cwd().resolve(), Path("/tmp"))
-        seen: set[Path] = set()
-        out: list[Path] = []
-        for b in (*implicit, *extras):
-            if b not in seen:
-                out.append(b)
-                seen.add(b)
-        return tuple(out)
+        """Write scope: server cwd and ``/tmp`` plus extras. ``~`` is not included."""
+        return self._with_extras(Path.cwd().resolve(), _resolve("/tmp"))
 
     @property
     def exec_allowed_bases(self) -> tuple[Path, ...]:
-        """Exec (shell) scope: cwd only. Tightest of the three."""
-        extras = self._parse_paths(self.linuxops_allowed_paths)
-        implicit = (Path.cwd().resolve(),)
-        seen: set[Path] = set()
-        out: list[Path] = []
-        for b in (*implicit, *extras):
-            if b not in seen:
-                out.append(b)
-                seen.add(b)
-        return tuple(out)
+        """Exec scope: server cwd plus extras. Tightest of the three."""
+        return self._with_extras(Path.cwd().resolve())
+
+    @property
+    def denied_bases(self) -> tuple[Path, ...]:
+        """Hard-deny list — always wins over every allowlist.
+
+        Seeded paths are resolved too, so a symlinked home directory cannot
+        sidestep the check.
+        """
+        seeded = (_resolve(p) for p in _SEEDED_DENY)
+        return _unique((*seeded, *self._parse_paths(self.linuxops_denied_paths)))
 
 
 @lru_cache

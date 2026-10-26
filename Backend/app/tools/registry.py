@@ -2,18 +2,21 @@
 
 The ``@tool`` decorator registers an async function whose single argument is
 a Pydantic model. JSON schemas for the LLM are generated from the model, so
-tool definitions stay DRY. The ``risk`` tier is recorded now and consumed by
-the Phase 02 safety middleware.
+tool definitions stay DRY. The ``risk`` tier is recorded now and enforced by
+the safety layer in later phases.
 """
 
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
-ToolHandler = Callable[[BaseModel], Awaitable[dict]]
+from app.llm.base import ToolSchema
+
+Risk = Literal["safe", "confirm", "block"]
+ToolHandler = Callable[[Any], Awaitable[dict[str, Any]]]
 
 
 @dataclass(frozen=True)
@@ -24,10 +27,10 @@ class ToolInfo:
     description: str
     args_model: type[BaseModel]
     handler: ToolHandler
-    risk: str
+    risk: Risk
 
-    def schema(self) -> dict:
-        """Return this tool as an OpenAI-style function schema."""
+    def schema(self) -> ToolSchema:
+        """Return this tool as a function schema for the model."""
         return {
             "type": "function",
             "function": {
@@ -64,17 +67,21 @@ class ToolRegistry:
         *,
         name: str | None = None,
         description: str | None = None,
-        risk: str = "safe",
+        risk: Risk = "safe",
     ) -> Callable[[ToolHandler], ToolHandler]:
         """Return a decorator that registers an async tool function.
 
         Args:
             name: tool name; defaults to the function name.
             description: shown to the LLM; defaults to the docstring.
-            risk: safety tier for Phase 02 (safe/confirm/block).
+            risk: safety tier (safe/confirm/block).
 
         Returns:
             A decorator that registers the function and returns it unchanged.
+
+        Raises:
+            TypeError: from the decorator, if the function does not take
+                exactly one Pydantic model argument.
 
         """
 
@@ -85,12 +92,10 @@ class ToolRegistry:
             args_model = params[0].annotation
             if not (isinstance(args_model, type) and issubclass(args_model, BaseModel)):
                 raise TypeError(f"tool {func.__name__} arg must be a Pydantic BaseModel")
-            tool_name = name or func.__name__
-            tool_description = description or (inspect.getdoc(func) or "")
             self.register(
                 ToolInfo(
-                    name=tool_name,
-                    description=tool_description,
+                    name=name or func.__name__,
+                    description=description or inspect.getdoc(func) or "",
                     args_model=args_model,
                     handler=func,
                     risk=risk,
@@ -100,15 +105,15 @@ class ToolRegistry:
 
         return decorator
 
-    def schemas(self) -> list[dict]:
-        """Return all registered tools as OpenAI-style function schemas."""
+    def schemas(self) -> list[ToolSchema]:
+        """Return all registered tools as function schemas."""
         return [info.schema() for info in self._tools.values()]
 
     def names(self) -> list[str]:
         """Return the names of all registered tools."""
         return list(self._tools)
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> dict:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         """Validate arguments and run a registered tool.
 
         Args:
@@ -120,14 +125,13 @@ class ToolRegistry:
 
         Raises:
             ValueError: if the tool is unknown.
-            ValidationError: if arguments fail the tool's Pydantic model.
+            pydantic.ValidationError: if arguments fail the tool's model.
 
         """
         info = self._tools.get(name)
         if info is None:
             raise ValueError(f"unknown tool: {name}")
-        model = info.args_model.model_validate(arguments)
-        return await info.handler(model)
+        return await info.handler(info.args_model.model_validate(arguments))
 
 
 registry = ToolRegistry()

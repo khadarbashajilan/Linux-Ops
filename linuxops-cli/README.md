@@ -1,81 +1,49 @@
 # LinuxOps CLI
 
-Command-line interface for the LinuxOps AI assistant. A thin client that communicates with the FastAPI backend over HTTP.
+Thin command-line client for the LinuxOps backend. All agent logic lives in the
+backend; the CLI only sends HTTP requests and renders the replies.
 
-## Installation
+## Setup
+
+Uses its own uv-managed virtualenv (`linuxops-cli/.venv`, Python 3.14):
 
 ```bash
 cd linuxops-cli
-pip install -e .
+uv sync                 # creates .venv and installs the CLI + dev tools
+uv run linuxops --help
 ```
+
+Or install it as a global command: `uv tool install ./linuxops-cli`.
+
+The backend must be running (`cd Backend && uv run uvicorn app.main:app`).
 
 ## Usage
 
-### Chat (REPL mode)
-
 ```bash
-linuxops chat
+linuxops chat                                  # interactive
+linuxops chat "what's in my home folder?"      # one-shot (exit code 1 on error)
+linuxops health                                # backend + Ollama status
+linuxops config                                # show effective config
+linuxops config --server http://localhost:8000 # save backend URL
+linuxops config --token <token>                # save API token
 ```
 
-### Chat (one-shot)
-
-```bash
-linuxops chat "what files are in my home folder?"
-```
-
-### Check backend health
-
-```bash
-linuxops health
-```
-
-### View conversation history
-
-```bash
-linuxops history
-linuxops history --limit 10
-```
-
-### View audit log
-
-```bash
-linuxops audit
-linuxops audit --limit 100
-```
-
-### Configure
-
-```bash
-# Set backend URL
-linuxops config --server http://localhost:8000
-
-# Set API token
-linuxops config --token your-token-here
-
-# Show current config
-linuxops config --show
-```
+`chat` and `health` accept `--server/-s` to override the backend URL.
 
 ## Configuration
 
-Config is stored in `~/.linuxops/config.toml`:
+Precedence: `--server` flag > environment > `~/.linuxops/config.toml` > default.
 
-```toml
-server_url = "http://localhost:8000"
-api_token = ""
+| Setting | Env var | Default |
+|---|---|---|
+| `server_url` | `LINUXOPS_SERVER_URL` | `http://localhost:8000` |
+| `api_token` | `LINUXOPS_API_TOKEN` | not set |
+
+The config file is written with `0600` permissions and tokens are masked on display.
+
+## Development
+
+```bash
+uv run ruff check . && uv run ruff format --check .
+uv run pytest
 ```
-
-Environment variables override config file:
-
-- `LINUXOPS_SERVER_URL` — backend URL
-- `LINUXOPS_API_TOKEN` — API token
-
-## Architecture
-
-The CLI is a **thin client** — all agent logic lives in the backend. It just:
-
-1. Sends HTTP requests to the FastAPI backend
-2. Displays responses with Rich formatting
-3. Handles tool approval prompts (when Phase 02 safety is enabled)
-
-No LLM calls, no tool execution, no state management — that's all in the backend.

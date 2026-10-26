@@ -1,17 +1,23 @@
 [project]
 name = "linuxops-cli"
 version = "0.1.0"
-description = "CLI client for LinuxOps AI assistant"
-requires-python = ">=3.10"
+description = "CLI client for the LinuxOps AI assistant"
+requires-python = ">=3.11"
 dependencies = [
-    "typer>=0.9.0",
-    "rich>=13.0.0",
-    "httpx>=0.25.0",
-    "toml>=0.10.2",
+    "typer>=0.12",
+    "rich>=13.0",
+    "httpx>=0.27",
+    "tomli-w>=1.0",
 ]
 
 [project.scripts]
 linuxops = "linuxops.cli:app"
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.9",
+]
 
 [build-system]
 requires = ["setuptools>=61.0"]
@@ -20,3 +26,17 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["linuxops*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "D"]
+ignore = ["D203", "D213", "D401", "D415"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D103"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

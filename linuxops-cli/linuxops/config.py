@@ -1,71 +1,68 @@
-"""CLI configuration management."""
+"""CLI configuration: ``~/.linuxops/config.toml`` with environment overrides.
+
+Precedence for every setting: command-line flag > environment variable >
+config file > built-in default.
+"""
 
 import os
+import tomllib
 from pathlib import Path
-import toml
+
+import tomli_w
 
 CONFIG_DIR = Path.home() / ".linuxops"
 CONFIG_PATH = CONFIG_DIR / "config.toml"
+DEFAULT_SERVER_URL = "http://localhost:8000"
+
+SERVER_URL_ENV = "LINUXOPS_SERVER_URL"
+API_TOKEN_ENV = "LINUXOPS_API_TOKEN"
 
 
-def ensure_config_dir() -> None:
-    """Create the config directory if it doesn't exist."""
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-
-
-def get_config() -> dict:
-    """Load config from ~/.linuxops/config.toml.
+def load_config() -> dict[str, str]:
+    """Load the config file.
 
     Returns:
-        Config dict with server_url, api_token, etc.
+        The stored settings, or an empty dict if the file does not exist.
+
     """
     if not CONFIG_PATH.exists():
-        return {
-            "server_url": "http://localhost:8000",
-            "api_token": "",
-        }
-    with open(CONFIG_PATH) as f:
-        return toml.load(f)
+        return {}
+    with CONFIG_PATH.open("rb") as fh:
+        return {k: str(v) for k, v in tomllib.load(fh).items()}
 
 
-def set_config_value(key: str, value: str) -> None:
-    """Set a config value and save to disk.
+def save_config_value(key: str, value: str) -> None:
+    """Persist one setting, keeping the file readable by the owner only.
 
     Args:
-        key: Config key (e.g., 'server_url', 'api_token').
-        value: Value to set.
+        key: setting name (``server_url`` or ``api_token``).
+        value: value to store.
+
     """
-    ensure_config_dir()
-    cfg = get_config()
-    cfg[key] = value
-    with open(CONFIG_PATH, "w") as f:
-        toml.dump(cfg, f)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    config = load_config()
+    config[key] = value
+    CONFIG_PATH.write_bytes(tomli_w.dumps(config).encode())
+    CONFIG_PATH.chmod(0o600)
 
 
-def get_server_url() -> str:
-    """Get the backend server URL from config or environment.
-
-    Returns:
-        Server URL string.
-    """
-    # Environment variable takes precedence
-    env_url = os.environ.get("LINUXOPS_SERVER_URL")
-    if env_url:
-        return env_url
-    cfg = get_config()
-    return cfg.get("server_url", "http://localhost:8000")
+def resolve_server_url(override: str | None = None) -> str:
+    """Return the backend URL from flag, env, config file, or default."""
+    return (
+        override
+        or os.environ.get(SERVER_URL_ENV)
+        or load_config().get("server_url")
+        or DEFAULT_SERVER_URL
+    )
 
 
-def get_api_token() -> str | None:
-    """Get the API token from config or environment.
+def resolve_api_token() -> str | None:
+    """Return the API token from env or config file, if any is set."""
+    return os.environ.get(API_TOKEN_ENV) or load_config().get("api_token") or None
 
-    Returns:
-        API token string or None.
-    """
-    # Environment variable takes precedence
-    env_token = os.environ.get("LINUXOPS_API_TOKEN")
-    if env_token:
-        return env_token
-    cfg = get_config()
-    token = cfg.get("api_token", "")
-    return token if token else None
+
+def mask_token(token: str | None) -> str:
+    """Return a display-safe version of a token."""
+    if not token:
+        return "[not set]"
+    return f"{token[:4]}…" if len(token) > 8 else "****"

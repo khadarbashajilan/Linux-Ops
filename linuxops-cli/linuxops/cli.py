@@ -1,210 +1,101 @@
-"""LinuxOps CLI — Typer app for interacting with the backend."""
+"""LinuxOps CLI — Typer app that talks to the backend over HTTP."""
+
+from typing import Annotated
 
 import typer
-from rich.console import Console
 from rich.prompt import Prompt
-from rich.table import Table
-from rich.panel import Panel
 
-from linuxops.client import LinuxOpsClient
-from linuxops.config import get_config
-from linuxops.ui import spinner_context, print_tool_calls, print_risk_badge
+from linuxops import config, ui
+from linuxops.client import BackendError, LinuxOpsClient
 
 app = typer.Typer(
     name="linuxops",
-    help="LinuxOps AI assistant CLI — natural language Linux operations.",
+    help="LinuxOps AI assistant — natural-language Linux operations.",
     add_completion=False,
+    no_args_is_help=True,
 )
-console = Console()
+
+ServerOption = Annotated[
+    str | None,
+    typer.Option("--server", "-s", help="Backend URL (overrides env and config)."),
+]
+
+
+def _client(server: str | None) -> LinuxOpsClient:
+    """Build a client from the resolved server URL and token."""
+    return LinuxOpsClient(config.resolve_server_url(server), token=config.resolve_api_token())
+
+
+def _send(client: LinuxOpsClient, message: str) -> bool:
+    """Send one message and render the reply.
+
+    Returns:
+        True on success, False if the backend reported an error.
+
+    """
+    try:
+        with ui.spinner("Thinking..."):
+            result = client.chat(message)
+    except BackendError as exc:
+        ui.print_error(str(exc))
+        return False
+    ui.print_answer(result.get("response", ""), result.get("tool_calls", []))
+    return True
 
 
 @app.command()
 def chat(
-    message: str = typer.Argument(None, help="One-shot message (omit for REPL mode)"),
-    server: str = typer.Option(None, "--server", "-s", help="Backend URL override"),
-):
-    """Chat with the LinuxOps agent (REPL or one-shot)."""
-    cfg = get_config()
-    base_url = server or cfg.get("server_url", "http://localhost:8000")
-    client = LinuxOpsClient(base_url=base_url, token=cfg.get("api_token"))
+    message: Annotated[
+        str | None, typer.Argument(help="One-shot message (omit for interactive mode).")
+    ] = None,
+    server: ServerOption = None,
+) -> None:
+    """Chat with the LinuxOps agent (interactive or one-shot)."""
+    with _client(server) as client:
+        if message:
+            if not _send(client, message):
+                raise typer.Exit(1)
+            return
 
-    if message:
-        _handle_message(client, message)
-        return
-
-    # REPL mode
-    console.print(
-        Panel.fit(
-            "[bold cyan]LinuxOps Chat[/bold cyan]\n"
-            f"Backend: {base_url}\n"
-            "Type your message (Ctrl+C to exit)",
-            border_style="cyan",
-        )
-    )
-
-    try:
+        ui.console.print(f"[bold cyan]LinuxOps chat[/] · {client.base_url} · Ctrl+C to exit")
         while True:
             try:
-                user_input = Prompt.ask("\n[bold green]You[/bold green]")
+                user_input = Prompt.ask("\n[bold green]You[/bold green]").strip()
             except (KeyboardInterrupt, EOFError):
-                console.print("\n[yellow]Exiting...[/yellow]")
-                break
-
-            if not user_input.strip():
-                continue
-
-            _handle_message(client, user_input)
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Exiting...[/yellow]")
+                ui.console.print("\n[yellow]Bye.[/yellow]")
+                return
+            if user_input:
+                _send(client, user_input)
 
 
-def _handle_message(client: LinuxOpsClient, message: str) -> None:
-    """Process one message through the agent and display the result."""
-    try:
-        with spinner_context("Thinking..."):
-            result = client.chat(message)
+@app.command()
+def health(server: ServerOption = None) -> None:
+    """Check backend and Ollama health."""
+    with _client(server) as client:
+        try:
+            status = client.health()
+        except BackendError as exc:
+            ui.print_error(str(exc))
+            raise typer.Exit(1) from exc
+        ui.print_health(status, client.base_url)
 
-        # Show tool calls if any
-        if result.get("tool_calls"):
-            print_tool_calls(result["tool_calls"])
 
-        # Show the response
-        console.print(
-            Panel(
-                result.get("response", "[dim]No response[/dim]"),
-                title="[bold blue]Agent[/bold blue]",
-                border_style="blue",
-                padding=(1, 2),
-            )
+@app.command("config")
+def config_cmd(
+    server_url: Annotated[str | None, typer.Option("--server", help="Save backend URL.")] = None,
+    token: Annotated[str | None, typer.Option("--token", help="Save API token.")] = None,
+) -> None:
+    """Show the effective config, or save new values to ~/.linuxops/config.toml."""
+    if server_url is None and token is None:
+        ui.console.print(f"[cyan]Config file:[/cyan] {config.CONFIG_PATH}")
+        ui.console.print(f"[cyan]Server URL:[/cyan]  {config.resolve_server_url()}")
+        ui.console.print(
+            f"[cyan]API token:[/cyan]   {config.mask_token(config.resolve_api_token())}"
         )
-    except Exception as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-
-
-@app.command()
-def health():
-    """Check backend health."""
-    cfg = get_config()
-    base_url = cfg.get("server_url", "http://localhost:8000")
-    client = LinuxOpsClient(base_url=base_url, token=cfg.get("api_token"))
-
-    try:
-        status = client.health()
-        table = Table(title="Backend Health", show_header=False)
-        table.add_column("Key", style="cyan")
-        table.add_column("Value", style="white")
-
-        table.add_row("Status", status.get("status", "unknown"))
-        table.add_row("Ollama", status.get("ollama", "unknown"))
-        if status.get("ollama_latency_ms"):
-            table.add_row("Latency", f"{status['ollama_latency_ms']:.1f}ms")
-        if status.get("providers"):
-            table.add_row("Providers", ", ".join(status["providers"]))
-
-        console.print(table)
-    except Exception as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-        raise typer.Exit(1)
-
-
-@app.command()
-def history(
-    limit: int = typer.Option(20, "--limit", "-l", help="Max conversations to show"),
-):
-    """Show conversation history."""
-    cfg = get_config()
-    base_url = cfg.get("server_url", "http://localhost:8000")
-    client = LinuxOpsClient(base_url=base_url, token=cfg.get("api_token"))
-
-    try:
-        conversations = client.list_conversations(limit=limit)
-        if not conversations:
-            console.print("[yellow]No conversations found.[/yellow]")
-            return
-
-        table = Table(title="Conversation History")
-        table.add_column("ID", style="cyan", no_wrap=True)
-        table.add_column("Created", style="green")
-        table.add_column("Messages", justify="right")
-        table.add_column("Last Message", style="dim")
-
-        for conv in conversations:
-            table.add_row(
-                conv.get("id", "")[:8],
-                conv.get("created_at", "")[:19],
-                str(conv.get("message_count", 0)),
-                (conv.get("last_message") or "")[:50],
-            )
-
-        console.print(table)
-    except Exception as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-
-
-@app.command()
-def audit(
-    limit: int = typer.Option(50, "--limit", "-l", help="Max entries to show"),
-):
-    """Show audit log (tool executions)."""
-    cfg = get_config()
-    base_url = cfg.get("server_url", "http://localhost:8000")
-    client = LinuxOpsClient(base_url=base_url, token=cfg.get("api_token"))
-
-    try:
-        entries = client.get_audit_log(limit=limit)
-        if not entries:
-            console.print("[yellow]No audit entries found.[/yellow]")
-            return
-
-        table = Table(title="Audit Log")
-        table.add_column("Time", style="cyan")
-        table.add_column("Tool", style="green")
-        table.add_column("Risk", justify="center")
-        table.add_column("Status", justify="center")
-        table.add_column("Args", style="dim")
-
-        for entry in entries:
-            risk = entry.get("risk_tier", "unknown")
-            status = entry.get("status", "unknown")
-            risk_display = print_risk_badge(risk)
-
-            table.add_row(
-                entry.get("timestamp", "")[:19],
-                entry.get("tool_name", ""),
-                risk_display,
-                f"[{'green' if status == 'executed' else 'yellow' if status == 'confirmed' else 'red'}]{status}[/]",
-                str(entry.get("arguments", ""))[:40],
-            )
-
-        console.print(table)
-    except Exception as exc:
-        console.print(f"[bold red]Error:[/bold red] {exc}")
-
-
-@app.command()
-def config(
-    server_url: str = typer.Option(None, "--server", help="Set backend URL"),
-    token: str = typer.Option(None, "--token", help="Set API token"),
-    show: bool = typer.Option(False, "--show", help="Show current config"),
-):
-    """View or update CLI config (~/.linuxops/config.toml)."""
-    from linuxops.config import CONFIG_PATH, set_config_value
-
-    if show or (server_url is None and token is None):
-        cfg = get_config()
-        console.print(f"[cyan]Config file:[/cyan] {CONFIG_PATH}")
-        console.print(f"[cyan]Server URL:[/cyan] {cfg.get('server_url', 'http://localhost:8000')}")
-        console.print(f"[cyan]API Token:[/cyan] {cfg.get('api_token', '[not set]')}")
         return
-
     if server_url:
-        set_config_value("server_url", server_url)
-        console.print(f"[green]✓[/green] server_url = {server_url}")
-
+        config.save_config_value("server_url", server_url)
+        ui.print_success(f"server_url = {server_url}")
     if token:
-        set_config_value("api_token", token)
-        console.print(f"[green]✓[/green] api_token = [dim]{token[:8]}...[/dim]")
-
-
-if __name__ == "__main__":
-    app()
+        config.save_config_value("api_token", token)
+        ui.print_success(f"api_token = {config.mask_token(token)}")

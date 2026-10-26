@@ -1,1 +1,1 @@
-"""LLM provider layer: base contracts, providers, and the failover router."""
+"""LLM provider layer: base contracts and the Ollama provider."""
